@@ -1,0 +1,6 @@
+@import "tailwindcss";
+
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #07090d; color: #f4f7fb; font-family: Arial, Helvetica, sans-serif; }
+button, textarea, input { font: inherit; }
