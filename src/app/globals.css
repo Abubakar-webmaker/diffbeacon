@@ -1,6 +1,20 @@
 @import "tailwindcss";
 
-:root { color-scheme: dark; }
+:root {
+  color-scheme: dark;
+  /* Offset anchor/programmatic scrolls by the sticky header height (h-12 = 48px) */
+  scroll-padding-top: 48px;
+}
+
 * { box-sizing: border-box; }
-body { margin: 0; background: #07090d; color: #f4f7fb; font-family: Arial, Helvetica, sans-serif; }
+
+body {
+  margin: 0;
+  background: #080a0f;
+  color: #e4e6ed;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
 button, textarea, input { font: inherit; }
