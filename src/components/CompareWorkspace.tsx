@@ -1,11 +1,71 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import {
+  GitBranch,
+  ScanSearch,
+  Loader2,
+  ShieldAlert,
+  CircleX,
+  TriangleAlert,
+  CircleCheck,
+  Sparkles,
+  ArrowRight,
+  AlertCircle,
+  Globe,
+  FileJson,
+  Clock,
+  ArrowRightLeft,
+  FileCode2,
+} from "lucide-react";
 import JsonEditor from "@/components/editor/JsonEditor";
+import RequestConfig from "@/components/live/RequestConfig";
+import { useAnimatedScore } from "@/hooks/useAnimatedScore";
+import { useReducedMotion } from "@/hooks/useReducedMotion";
+import type { ApiRequestConfig, ApiAnalysisResult } from "@/types/api";
 
+type Mode = "json" | "live" | "contract";
 type Change = { path: string; kind: string; severity: string; reason: string; before?: unknown; after?: unknown };
 type Analysis = { summary: string; recommendations: string[] } | null;
+type StatusComparison = { changed: true; baseline: number; candidate: number; baselineText: string; candidateText: string; severity: string } | { changed: false };
+
+const sampleContractA = `{
+  "openapi": "3.0.3",
+  "info": { "title": "User API", "version": "1.0" },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "User": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id":     { "type": "integer" },
+          "name":   { "type": "string" },
+          "status": { "type": "string", "enum": ["active", "disabled"] }
+        }
+      }
+    }
+  }
+}`;
+
+const sampleContractB = `{
+  "openapi": "3.0.3",
+  "info": { "title": "User API", "version": "2.0" },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "User": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id":     { "type": "string" },
+          "status": { "type": "string", "enum": ["active", "disabled", "pending"] }
+        }
+      }
+    }
+  }
+}`;
 
 const sampleA = `{
   "user": {
@@ -24,6 +84,14 @@ const sampleB = `{
   },
   "active": true
 }`;
+
+const defaultRequest = (label: "A" | "B"): ApiRequestConfig => ({
+  url: "",
+  method: "GET",
+  headers: {},
+  body: null,
+  auth: { type: "none" },
+});
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
 
@@ -57,8 +125,30 @@ const RISK_TEXT: Record<string, string> = {
   MEDIUM:       "text-amber-400",
   LOW:          "text-emerald-400",
   "NO CHANGES": "text-zinc-500",
-  READY:        "text-zinc-600",
 };
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function parseJsonSafely(
+  value: string,
+  label: "Response A" | "Response B",
+): { ok: true; value: unknown } | { ok: false; message: string } {
+  try {
+    return { ok: true, value: JSON.parse(value) };
+  } catch {
+    return {
+      ok: false,
+      message: `${label} contains invalid JSON. Check the editor for red underlines and use Format to auto-fix indentation.`,
+    };
+  }
+}
+
+function statusClass(status: number): string {
+  if (status >= 500) return "text-red-400";
+  if (status >= 400) return "text-orange-400";
+  if (status >= 300) return "text-amber-400";
+  return "text-emerald-400";
+}
 
 // ─── Small components ─────────────────────────────────────────────────────────
 
@@ -72,21 +162,48 @@ function SeverityPip({ severity }: { severity: string }) {
 }
 
 function KindTag({ kind }: { kind: string }) {
-  return (
-    <span className="font-mono text-[11px] text-zinc-500">{kind}</span>
-  );
+  return <span className="font-mono text-[11px] text-zinc-500">{kind}</span>;
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function CompareWorkspace() {
-  const [before, setBefore]   = useState(sampleA);
-  const [after, setAfter]     = useState(sampleB);
+  // ── Mode ──
+  const [mode, setMode] = useState<Mode>("json");
+
+  // ── JSON mode state ──
+  const [before, setBefore] = useState(sampleA);
+  const [after, setAfter]   = useState(sampleB);
+
+  // ── Contract mode state ──
+  const [contractA, setContractA] = useState(sampleContractA);
+  const [contractB, setContractB] = useState(sampleContractB);
+  const [contractDirection, setContractDirection] = useState<"REQUEST" | "RESPONSE">("RESPONSE");
+
+  // ── Live mode state ──
+  const [reqA, setReqA] = useState<ApiRequestConfig>(() => defaultRequest("A"));
+  const [reqB, setReqB] = useState<ApiRequestConfig>(() => defaultRequest("B"));
+  const [liveResult, setLiveResult] = useState<ApiAnalysisResult | null>(null);
+  const [statusComparison, setStatusComparison] = useState<StatusComparison | null>(null);
+
+  // ── Shared result state ──
   const [changes, setChanges] = useState<Change[]>([]);
-  const [risk, setRisk]       = useState({ score: 0, label: "READY" });
+  const [risk, setRisk]       = useState<{ score: number; label: string } | null>(null);
   const [ai, setAi]           = useState<Analysis>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState("");
+
+  // ── Animation state ──
+  const reduced                     = useReducedMotion();
+  const [entered, setEntered]       = useState(false);
+  const [resultsKey, setResultsKey] = useState(0);
+  const animatedScore               = useAnimatedScore(risk?.score ?? 0);
+  const resultsRef                  = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setEntered(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
 
   const counts = useMemo(() => ({
     breaking: changes.filter((c) => ["CRITICAL", "HIGH"].includes(c.severity)).length,
@@ -94,274 +211,554 @@ export default function CompareWorkspace() {
     safe:     changes.filter((c) => c.severity === "LOW" || c.severity === "SAFE").length,
   }), [changes]);
 
+  // ── JSON analyze ──
+  async function analyzeJson() {
+    const parsedA = parseJsonSafely(before, "Response A");
+    const parsedB = parseJsonSafely(after,  "Response B");
+    if (!parsedA.ok) { setError(parsedA.message); return; }
+    if (!parsedB.ok) { setError(parsedB.message); return; }
+
+    const res  = await fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ before: parsedA.value, after: parsedB.value, ai: true }),
+    });
+    const data = await res.json() as {
+      changes: Change[];
+      risk: { score: number; label: string };
+      ai?: { summary: string; recommendations: string[] } | null;
+      error?: string;
+    };
+    if (!res.ok) throw new Error(data.error ?? "Analysis failed");
+    setChanges(data.changes);
+    setRisk(data.risk);
+    setAi(data.ai ? { summary: data.ai.summary, recommendations: data.ai.recommendations } : null);
+  }
+
+  // ── Live analyze ──
+  async function analyzeLive() {
+    if (!reqA.url.trim()) { setError("Request A URL is required."); return; }
+    if (!reqB.url.trim()) { setError("Request B URL is required."); return; }
+
+    const res  = await fetch("/api/request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestA: reqA, requestB: reqB, ai: true }),
+    });
+    const data = await res.json() as {
+      result: ApiAnalysisResult;
+      changes: Change[];
+      risk: { score: number; label: string };
+      ai?: { summary: string; recommendations: string[] } | null;
+      error?: string;
+    };
+    if (!res.ok) throw new Error(data.error ?? "Request failed");
+    setLiveResult(data.result);
+    setChanges(data.changes);
+    setRisk(data.risk);
+    setAi(data.ai ? { summary: data.ai.summary, recommendations: data.ai.recommendations } : null);
+
+    // Derive status comparison from the result metadata
+    const metaA = data.result.responseA.meta;
+    const metaB = data.result.responseB.meta;
+    if (metaA.status !== metaB.status) {
+      setStatusComparison({
+        changed: true,
+        baseline: metaA.status,
+        candidate: metaB.status,
+        baselineText: metaA.statusText,
+        candidateText: metaB.statusText,
+        severity: data.changes.find((c) => c.kind === "STATUS_CHANGED")?.severity ?? "MEDIUM",
+      });
+    } else {
+      setStatusComparison({ changed: false });
+    }
+  }
+
+  // ── Contract analyze ──
+  async function analyzeContract() {
+    if (!contractA.trim()) { setError("Baseline contract is required."); return; }
+    if (!contractB.trim()) { setError("Candidate contract is required."); return; }
+
+    const res = await fetch("/api/contract/diff", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ baseline: contractA, candidate: contractB, direction: contractDirection, ai: true }),
+    });
+    const data = await res.json() as {
+      changes: Change[];
+      risk: { score: number; label: string };
+      ai?: { summary: string; recommendations: string[] } | null;
+      error?: string;
+    };
+    if (!res.ok) throw new Error(data.error ?? "Contract analysis failed");
+    setChanges(data.changes);
+    setRisk(data.risk);
+    setAi(data.ai ? { summary: data.ai.summary, recommendations: data.ai.recommendations } : null);
+  }
+
+  // ── Unified analyze ──
   async function analyze() {
     setError("");
     setLoading(true);
     try {
-      const payload = { before: JSON.parse(before), after: JSON.parse(after), ai: true };
-      const res  = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Analysis failed");
-      setChanges(data.changes);
-      setRisk(data.risk);
-      setAi(data.ai ? { summary: data.ai.summary, recommendations: data.ai.recommendations } : null);
+      if (mode === "json") await analyzeJson();
+      else if (mode === "live") await analyzeLive();
+      else await analyzeContract();
+      setResultsKey((k) => k + 1);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Invalid JSON");
+      setError(e instanceof Error ? e.message : "Something went wrong. Check your connection and try again.");
     } finally {
       setLoading(false);
     }
   }
 
-  const hasResults = changes.length > 0;
+  useEffect(() => {
+    if (resultsKey > 0) resultsRef.current?.focus({ preventScroll: false });
+  }, [resultsKey]);
+
+  // Reset live result when switching modes
+  function switchMode(m: Mode) {
+    setMode(m);
+    setError("");
+    setChanges([]);
+    setRisk(null);
+    setAi(null);
+    setLiveResult(null);
+    setStatusComparison(null);
+    setResultsKey(0);
+  }
+
+  const bodyChanges = changes.filter((c) => c.kind !== "STATUS_CHANGED");
+  const hasBodyChanges = bodyChanges.length > 0;
+  const hasRisk    = risk !== null;
+
+  // ── Separate status change from body changes for display ──
+  const statusChange = changes.find((c) => c.kind === "STATUS_CHANGED") ?? null;
+
+  // ── Contract-specific change metadata helpers ──
+  type ContractChange = Change & { compatibility?: string; fieldRequirement?: string; requirementBefore?: string; requirementAfter?: string; enumValue?: unknown; direction?: string; };
+  function compatBadge(c: ContractChange): string | null {
+    if (!c.compatibility) return null;
+    if (c.compatibility === "BREAKING") return "BREAKING";
+    if (c.compatibility === "NON_BREAKING") return "SAFE";
+    return "REVIEW";
+  }
+  const COMPAT_TEXT: Record<string, string> = {
+    BREAKING: "text-red-400",
+    SAFE: "text-emerald-400",
+    REVIEW: "text-amber-400",
+  };
+  const COMPAT_BG: Record<string, string> = {
+    BREAKING: "bg-red-950/40 border-red-900/40",
+    SAFE: "bg-emerald-950/30 border-emerald-900/30",
+    REVIEW: "bg-amber-950/30 border-amber-900/30",
+  };
+
+  function rowDelay(i: number): string {
+    return `${Math.min(i * 60, 300)}ms`;
+  }
 
   return (
-    <div className="min-h-screen">
+    <>
+      <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[100] focus:rounded-lg focus:bg-indigo-600 focus:px-4 focus:py-2 focus:text-[13px] focus:font-semibold focus:text-white focus:outline-none">
+        Skip to main content
+      </a>
 
-      {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <header className="sticky top-0 z-50 border-b border-white/[0.06] bg-[#080a0f]/95 backdrop-blur-sm">
-        <div className="mx-auto flex h-12 max-w-7xl items-center justify-between px-5 md:px-8">
+      <div
+        className="min-h-screen"
+        style={reduced ? undefined : {
+          opacity:   entered ? 1 : 0,
+          transform: entered ? "translateY(0)" : "translateY(8px)",
+          transition: "opacity 350ms cubic-bezier(0.16,1,0.3,1), transform 350ms cubic-bezier(0.16,1,0.3,1)",
+        }}
+      >
+        {/* ── Header ── */}
+        <header className="sticky top-0 z-50 border-b border-white/[0.06] bg-[#080a0f]/95 backdrop-blur-sm">
+          <div className="mx-auto flex h-12 max-w-7xl items-center justify-between px-5 md:px-8">
+            <Link href="/" className="flex items-center gap-2 transition-opacity duration-150 hover:opacity-80">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <rect width="20" height="20" rx="5" fill="#4f46e5" />
+                <path d="M5 7h6M5 10h8M5 13h5" stroke="white" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+              <span className="text-[13px] font-semibold tracking-tight text-zinc-100">DiffBeacon</span>
+            </Link>
+            <nav aria-label="Site navigation" className="flex items-center gap-4">
+              <a href="https://github.com/Abubakar-webmaker/diffbeacon" target="_blank" rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 text-[13px] text-zinc-500 transition-colors duration-150 hover:text-zinc-300">
+                <GitBranch size={14} strokeWidth={1.75} aria-hidden="true" />
+                GitHub
+              </a>
+              <span className="text-[11px] font-medium tracking-[0.15em] text-zinc-600" aria-label="Version 1.1">V1.1</span>
+            </nav>
+          </div>
+        </header>
 
-          <Link href="/" className="flex items-center gap-2">
-            {/* Wordmark mark — simple geometric square, no gradients */}
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-              <rect width="20" height="20" rx="5" fill="#4f46e5" />
-              <path d="M5 7h6M5 10h8M5 13h5" stroke="white" strokeWidth="1.5" strokeLinecap="round" />
-            </svg>
-            <span className="text-[13px] font-semibold tracking-tight text-zinc-100">DiffBeacon</span>
-          </Link>
+        <main id="main-content" className="mx-auto max-w-7xl px-5 md:px-8">
 
-          <nav className="flex items-center gap-4">
-            <a
-              href="https://github.com/Abubakar-webmaker/diffbeacon"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[13px] text-zinc-500 transition-colors hover:text-zinc-300"
+          {/* ── Hero ── */}
+          <div className="pb-6 pt-10">
+            <p className="mb-2 text-[11px] font-medium tracking-[0.2em] text-zinc-600 uppercase" aria-hidden="true">
+              API Response Analysis
+            </p>
+            <h1 className="text-[1.6rem] font-semibold leading-snug tracking-tight text-zinc-100 md:text-[2rem]">
+              Detect breaking API changes before production.
+            </h1>
+            <p className="mt-2 text-sm text-zinc-500">
+              Deterministic diff first. AI explains impact second.
+            </p>
+          </div>
+
+          {/* ── Mode selector ── */}
+          <div className="mb-6 flex items-center gap-1 rounded-lg border border-white/[0.06] bg-zinc-900/60 p-1 w-fit" role="tablist" aria-label="Comparison mode">
+            <button
+              role="tab"
+              aria-selected={mode === "json"}
+              onClick={() => switchMode("json")}
+              className={`inline-flex items-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-medium transition-colors duration-150 ${
+                mode === "json"
+                  ? "bg-zinc-800 text-zinc-100 shadow-sm"
+                  : "text-zinc-500 hover:text-zinc-300"
+              }`}
             >
-              GitHub
-            </a>
-            <span className="text-[11px] font-medium tracking-[0.15em] text-zinc-600">V1</span>
-          </nav>
-        </div>
-      </header>
-
-      <main className="mx-auto max-w-7xl px-5 md:px-8">
-
-        {/* ── Hero ───────────────────────────────────────────────────────────── */}
-        <div className="pb-8 pt-10">
-          <p className="mb-2 text-[11px] font-medium tracking-[0.2em] text-zinc-600 uppercase">
-            JSON Response Analysis
-          </p>
-          <h1 className="text-[1.6rem] font-semibold leading-snug tracking-tight text-zinc-100 md:text-[2rem]">
-            Detect breaking API changes before production.
-          </h1>
-          <p className="mt-2 text-sm text-zinc-500">
-            Deterministic diff first. AI explains impact second.
-          </p>
-        </div>
-
-        {/* ── Editors ────────────────────────────────────────────────────────── */}
-        <section aria-label="JSON comparison editors">
-          <div className="relative grid gap-3 lg:grid-cols-2">
-            <JsonEditor
-              title="Response A"
-              label="Baseline"
-              value={before}
-              onChange={setBefore}
-              path="file:///response-a.json"
-            />
-
-            {/* VS — sits on the gap between editors, desktop only */}
-            <div className="absolute left-1/2 top-1/2 z-10 hidden -translate-x-1/2 -translate-y-1/2 lg:block">
-              <span className="flex h-7 w-7 items-center justify-center rounded-full border border-zinc-700/80 bg-[#080a0f] text-[10px] font-semibold text-zinc-600">
-                VS
-              </span>
-            </div>
-
-            <JsonEditor
-              title="Response B"
-              label="Candidate"
-              value={after}
-              onChange={setAfter}
-              path="file:///response-b.json"
-            />
+              <FileJson size={13} strokeWidth={1.75} aria-hidden="true" />
+              JSON
+            </button>
+            <button
+              role="tab"
+              aria-selected={mode === "live"}
+              onClick={() => switchMode("live")}
+              className={`inline-flex items-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-medium transition-colors duration-150 ${
+                mode === "live"
+                  ? "bg-zinc-800 text-zinc-100 shadow-sm"
+                  : "text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              <Globe size={13} strokeWidth={1.75} aria-hidden="true" />
+              Live API
+            </button>
+            <button
+              role="tab"
+              aria-selected={mode === "contract"}
+              onClick={() => switchMode("contract")}
+              className={`inline-flex items-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-medium transition-colors duration-150 ${
+                mode === "contract"
+                  ? "bg-zinc-800 text-zinc-100 shadow-sm"
+                  : "text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              <FileCode2 size={13} strokeWidth={1.75} aria-hidden="true" />
+              Contract
+            </button>
           </div>
-        </section>
 
-        {/* ── Action bar ─────────────────────────────────────────────────────── */}
-        <div className="mt-4 flex items-center justify-between gap-4 border-t border-white/[0.05] pt-4">
-          <p className="text-[13px] text-zinc-600">
-            Live API requests arrive in V1.1.
-          </p>
-          <button
-            onClick={analyze}
-            disabled={loading}
-            className="inline-flex min-w-[148px] items-center justify-center gap-2 rounded-lg bg-indigo-600 px-5 py-2.5 text-[13px] font-semibold text-white transition-colors hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {loading ? (
-              <>
-                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/25 border-t-white" />
-                Analyzing…
-              </>
-            ) : (
-              "Analyze changes"
-            )}
-          </button>
-        </div>
-
-        {/* ── Error ──────────────────────────────────────────────────────────── */}
-        {error && (
-          <p className="mt-3 rounded-lg border border-red-900/50 bg-red-950/20 px-4 py-2.5 text-[13px] text-red-400">
-            {error}
-          </p>
-        )}
-
-        {/* ── Results ────────────────────────────────────────────────────────── */}
-        <section className="mt-10" aria-label="Analysis results">
-
-          {/* Risk row — no card, just a ruled section */}
-          <div className="flex flex-wrap items-baseline gap-x-8 gap-y-3 border-b border-white/[0.06] pb-6">
-            {/* Score */}
-            <div>
-              <p className="text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">Risk Score</p>
-              <p className="mt-1 leading-none">
-                <span className={`text-[2.75rem] font-semibold tabular-nums leading-none ${RISK_TEXT[risk.label] ?? "text-zinc-300"}`}>
-                  {risk.score}
+          {/* ── Input area ── */}
+          {mode === "json" ? (
+            <section aria-label="JSON comparison editors">
+              <div className="relative grid gap-3 lg:grid-cols-2">
+                <JsonEditor title="Response A" label="Baseline" value={before} onChange={setBefore} path="file:///response-a.json" />
+                <div className="absolute left-1/2 top-1/2 z-10 hidden -translate-x-1/2 -translate-y-1/2 lg:block" aria-hidden="true">
+                  <span className="flex h-7 w-7 items-center justify-center rounded-full border border-zinc-700/80 bg-[#080a0f] text-[10px] font-semibold text-zinc-600">VS</span>
+                </div>
+                <JsonEditor title="Response B" label="Candidate" value={after} onChange={setAfter} path="file:///response-b.json" />
+              </div>
+            </section>
+          ) : mode === "live" ? (
+            <section aria-label="Live API request configuration">
+              <div className="relative grid gap-3 lg:grid-cols-2">
+                <RequestConfig label="Request A · Baseline" value={reqA} onChange={setReqA} />
+                <div className="absolute left-1/2 top-1/2 z-10 hidden -translate-x-1/2 -translate-y-1/2 lg:block" aria-hidden="true">
+                  <span className="flex h-7 w-7 items-center justify-center rounded-full border border-zinc-700/80 bg-[#080a0f] text-[10px] font-semibold text-zinc-600">VS</span>
+                </div>
+                <RequestConfig label="Request B · Candidate" value={reqB} onChange={setReqB} />
+              </div>
+              <p className="mt-3 text-[11px] text-zinc-700">
+                Requests are executed server-side. Credentials are never logged, stored, or sent to AI providers.
+                Only use this with APIs you are authorized to access.
+              </p>
+            </section>
+          ) : (
+            <section aria-label="Contract comparison editors">
+              <div className="mb-3 flex items-center gap-3">
+                <span className="text-[11px] text-zinc-600">Direction:</span>
+                <div className="flex items-center gap-1 rounded-md border border-white/[0.06] bg-zinc-900/60 p-0.5" role="group" aria-label="Contract direction">
+                  {(["RESPONSE", "REQUEST"] as const).map((d) => (
+                    <button
+                      key={d}
+                      onClick={() => setContractDirection(d)}
+                      className={`rounded px-3 py-1 text-[11px] font-medium transition-colors duration-150 ${
+                        contractDirection === d ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"
+                      }`}
+                    >
+                      {d}
+                    </button>
+                  ))}
+                </div>
+                <span className="text-[11px] text-zinc-700">
+                  {contractDirection === "RESPONSE"
+                    ? "Analyzing server response schemas — optional→required is NON_BREAKING, required→optional is BREAKING."
+                    : "Analyzing client request schemas — optional→required is BREAKING, required→optional is NON_BREAKING."}
                 </span>
-                <span className="ml-1 text-base text-zinc-700">/100</span>
+              </div>
+              <div className="relative grid gap-3 lg:grid-cols-2">
+                <JsonEditor title="Contract A" label="Baseline" value={contractA} onChange={setContractA} path="file:///contract-a.json" />
+                <div className="absolute left-1/2 top-1/2 z-10 hidden -translate-x-1/2 -translate-y-1/2 lg:block" aria-hidden="true">
+                  <span className="flex h-7 w-7 items-center justify-center rounded-full border border-zinc-700/80 bg-[#080a0f] text-[10px] font-semibold text-zinc-600">VS</span>
+                </div>
+                <JsonEditor title="Contract B" label="Candidate" value={contractB} onChange={setContractB} path="file:///contract-b.json" />
+              </div>
+              <p className="mt-3 text-[11px] text-zinc-700">
+                Paste OpenAPI 3.x or JSON Schema documents. JSON only — convert YAML before pasting.
+                Local $ref references are resolved. External URL references are blocked.
               </p>
-              <p className={`mt-1 text-xs font-semibold tracking-wide ${RISK_TEXT[risk.label] ?? "text-zinc-500"}`}>
-                {risk.label}
-              </p>
-            </div>
+            </section>
+          )}
 
-            {/* Divider */}
-            <div className="hidden h-12 w-px bg-white/[0.07] sm:block" />
-
-            {/* Counts — inline, not cards */}
-            <div className="flex gap-6">
-              <div>
-                <p className="text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">Breaking</p>
-                <p className={`mt-1 text-2xl font-semibold tabular-nums ${counts.breaking > 0 ? "text-red-400" : "text-zinc-500"}`}>
-                  {counts.breaking}
-                </p>
-              </div>
-              <div>
-                <p className="text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">Warnings</p>
-                <p className={`mt-1 text-2xl font-semibold tabular-nums ${counts.warnings > 0 ? "text-amber-400" : "text-zinc-500"}`}>
-                  {counts.warnings}
-                </p>
-              </div>
-              <div>
-                <p className="text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">Safe</p>
-                <p className="mt-1 text-2xl font-semibold tabular-nums text-zinc-500">
-                  {counts.safe}
-                </p>
-              </div>
-            </div>
+          {/* ── Action bar ── */}
+          <div className="mt-4 flex items-center justify-between gap-4 border-t border-white/[0.05] pt-4">
+            <p className="text-[13px] text-zinc-600">
+              {mode === "json" ? "Paste two JSON responses and click Analyze." : mode === "live" ? "Configure both endpoints and click Fetch & Analyze." : "Paste two OpenAPI 3.x or JSON Schema contracts and click Analyze."}
+            </p>
+            <button
+              onClick={analyze}
+              disabled={loading}
+              aria-busy={loading}
+              className="inline-flex min-w-[168px] items-center justify-center gap-2 rounded-lg bg-indigo-600 px-5 py-2.5 text-[13px] font-semibold text-white transition duration-150 hover:bg-indigo-500 active:scale-[0.97] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {loading ? (
+                <><Loader2 size={14} strokeWidth={2} className="animate-spin" aria-hidden="true" />Analyzing…</>
+              ) : mode === "json" ? (
+                <><ScanSearch size={14} strokeWidth={1.75} aria-hidden="true" />Analyze changes</>
+              ) : mode === "live" ? (
+                <><ArrowRightLeft size={14} strokeWidth={1.75} aria-hidden="true" />Fetch &amp; Analyze</>
+              ) : (
+                <><FileCode2 size={14} strokeWidth={1.75} aria-hidden="true" />Analyze contract</>
+              )}
+            </button>
           </div>
 
-          {/* Changes + AI — two columns on large screens */}
-          <div className="mt-6 grid gap-8 lg:grid-cols-[1fr_320px]">
+          {/* ── Error ── */}
+          {error && (
+            <div role="alert" aria-live="assertive" className="mt-4 flex items-start gap-3 rounded-lg border border-red-900/50 bg-red-950/20 px-4 py-3 text-[13px] text-red-400">
+              <AlertCircle size={15} strokeWidth={1.75} className="mt-px shrink-0" aria-hidden="true" />
+              <span>{error}</span>
+            </div>
+          )}
 
-            {/* ── Detected changes ── */}
-            <div>
-              <div className="mb-3 flex items-center gap-2">
-                <h2 className="text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">
-                  Detected Changes
-                </h2>
-                {hasResults && (
-                  <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500">
-                    {changes.length}
+          {/* ── Live metadata ── */}
+          {mode === "live" && liveResult && (
+            <div className="mt-6 grid gap-3 rounded-xl border border-white/[0.06] p-4 sm:grid-cols-2">
+              {(["A", "B"] as const).map((side) => {
+                const meta = side === "A" ? liveResult.responseA.meta : liveResult.responseB.meta;
+                const req  = side === "A" ? liveResult.requestA    : liveResult.requestB;
+                return (
+                  <div key={side} className="space-y-1.5">
+                    <p className="text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">Response {side}</p>
+                    <p className="font-mono text-[11px] text-zinc-500 truncate">{req.method} {req.url}</p>
+                    <div className="flex flex-wrap gap-4">
+                      <span className={`text-[13px] font-semibold tabular-nums ${statusClass(meta.status)}`}>
+                        {meta.status} {meta.statusText}
+                      </span>
+                      <span className="inline-flex items-center gap-1 text-[12px] text-zinc-500">
+                        <Clock size={11} strokeWidth={1.75} aria-hidden="true" />
+                        {meta.durationMs} ms
+                      </span>
+                      {meta.contentType && (
+                        <span className="text-[11px] text-zinc-600">{meta.contentType.split(";")[0]}</span>
+                      )}
+                    </div>
+                    {meta.bodyType !== "json" && (
+                      <p className="text-[11px] text-amber-600 uppercase tracking-wide">
+                        {meta.bodyType === "empty" ? "Empty response" : `${meta.bodyType} response — diff not available`}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* ── Results ── */}
+          <section
+            key={resultsKey}
+            ref={resultsRef}
+            tabIndex={-1}
+            aria-label="Analysis results"
+            aria-live="polite"
+            className={`mt-10 outline-none ${resultsKey > 0 && !reduced ? "db-enter" : ""}`}
+          >
+            {/* Risk row */}
+            <div className="flex flex-wrap items-baseline gap-x-8 gap-y-3 border-b border-white/[0.06] pb-6">
+              <div>
+                <p className="inline-flex items-center gap-1.5 text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">
+                  <ShieldAlert size={11} strokeWidth={1.75} aria-hidden="true" />
+                  Risk Score
+                </p>
+                <p className="mt-1 leading-none" aria-label={`Risk score: ${risk?.score ?? 0} out of 100`}>
+                  <span className={`text-[2.75rem] font-semibold tabular-nums leading-none ${hasRisk ? (RISK_TEXT[risk.label] ?? "text-zinc-300") : "text-zinc-700"}`} aria-hidden="true">
+                    {animatedScore}
                   </span>
+                  <span className="ml-1 text-base text-zinc-700" aria-hidden="true">/100</span>
+                </p>
+                {hasRisk ? (
+                  <p className={`mt-1 text-xs font-semibold tracking-wide ${RISK_TEXT[risk.label] ?? "text-zinc-500"}`}>{risk.label}</p>
+                ) : (
+                  <p className="mt-1 text-xs text-zinc-700">—</p>
                 )}
               </div>
 
-              {!hasResults ? (
-                <div className="rounded-lg border border-dashed border-zinc-800 py-12 text-center">
-                  <p className="text-[13px] text-zinc-600">Run an analysis to see detected changes.</p>
-                </div>
-              ) : (
-                <ul className="divide-y divide-white/[0.05]">
-                  {changes.map((change, index) => (
-                    <li
-                      key={`${change.path}-${index}`}
-                      className={`border-l-2 py-4 pl-4 transition-colors hover:bg-white/[0.02] ${SEV_ROW_BORDER[change.severity] ?? "border-l-zinc-700"}`}
-                    >
-                      {/* Top row: path + kind + severity */}
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                        <code className="font-mono text-[13px] font-medium text-zinc-100">
-                          {change.path}
-                        </code>
-                        <KindTag kind={change.kind} />
-                        <SeverityPip severity={change.severity} />
-                      </div>
-                      {/* Description */}
-                      <p className="mt-1.5 text-[13px] leading-relaxed text-zinc-500">
-                        {change.reason}
-                      </p>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+              <div className="hidden h-12 w-px bg-white/[0.07] sm:block" aria-hidden="true" />
 
-            {/* ── AI Impact ── */}
-            <div>
-              <h2 className="mb-3 text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">
-                AI Impact Review
-              </h2>
-
-              {ai ? (
-                <div>
-                  <p className="text-[13px] leading-relaxed text-zinc-300">{ai.summary}</p>
-
-                  <div className="mt-5 border-t border-white/[0.06] pt-5">
-                    <p className="mb-3 text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">
-                      Recommended Actions
-                    </p>
-                    <ul className="space-y-3">
-                      {ai.recommendations.map((item) => (
-                        <li key={item} className="flex gap-2.5 text-[13px] text-zinc-400">
-                          <span className="mt-px shrink-0 text-zinc-600">→</span>
-                          <span>{item}</span>
-                        </li>
-                      ))}
-                    </ul>
+              <div className="flex gap-6">
+                {[
+                  { icon: <CircleX size={10} strokeWidth={1.75} aria-hidden="true" />, label: "Breaking", val: counts.breaking, color: hasRisk && counts.breaking > 0 ? "text-red-400" : "text-zinc-700" },
+                  { icon: <TriangleAlert size={10} strokeWidth={1.75} aria-hidden="true" />, label: "Warnings", val: counts.warnings, color: hasRisk && counts.warnings > 0 ? "text-amber-400" : "text-zinc-700" },
+                  { icon: <CircleCheck size={10} strokeWidth={1.75} aria-hidden="true" />, label: "Safe", val: counts.safe, color: hasRisk ? "text-zinc-400" : "text-zinc-700" },
+                ].map(({ icon, label, val, color }) => (
+                  <div key={label}>
+                    <p className="inline-flex items-center gap-1 text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">{icon}{label}</p>
+                    <p className={`mt-1 text-2xl font-semibold tabular-nums ${color}`}>{hasRisk ? val : "—"}</p>
                   </div>
-                </div>
-              ) : (
-                <p className="text-[13px] text-zinc-600">
-                  AI analysis appears after you run the comparison.
-                </p>
-              )}
+                ))}
+              </div>
             </div>
 
+            {/* Changes + AI */}
+            <div className="mt-6 grid gap-8 lg:grid-cols-[1fr_320px]">
+              <div>
+                {/* ── Response Metadata (live mode only) ── */}
+                {mode === "live" && liveResult && (statusComparison || hasBodyChanges) && (
+                  <div className="mb-6">
+                    <p className="mb-3 text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">Response Metadata</p>
+                    <div className="divide-y divide-white/[0.05] rounded-lg border border-white/[0.06]">
+                      {/* Status row */}
+                      <div className={`flex items-center gap-3 px-4 py-3 border-l-2 ${
+                        statusComparison?.changed
+                          ? (SEV_ROW_BORDER[statusComparison.severity] ?? "border-l-zinc-700")
+                          : "border-l-zinc-800"
+                      }`}>
+                        <span className="text-[10px] font-medium tracking-[0.15em] text-zinc-600 uppercase w-20 shrink-0">STATUS</span>
+                        {statusComparison?.changed ? (
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className={`font-mono text-[13px] font-semibold tabular-nums ${statusClass(statusComparison.baseline)}`}>
+                              {statusComparison.baseline} {statusComparison.baselineText}
+                            </span>
+                            <ArrowRight size={12} strokeWidth={1.75} className="text-zinc-600 shrink-0" aria-hidden="true" />
+                            <span className={`font-mono text-[13px] font-semibold tabular-nums ${statusClass(statusComparison.candidate)}`}>
+                              {statusComparison.candidate} {statusComparison.candidateText}
+                            </span>
+                            <SeverityPip severity={statusComparison.severity} />
+                          </div>
+                        ) : (
+                          <span className={`font-mono text-[13px] font-semibold tabular-nums ${statusClass(liveResult.responseA.meta.status)}`}>
+                            {liveResult.responseA.meta.status} {liveResult.responseA.meta.statusText}
+                          </span>
+                        )}
+                      </div>
+                      {/* Response time row */}
+                      <div className="flex items-center gap-3 px-4 py-3 border-l-2 border-l-zinc-800">
+                        <span className="text-[10px] font-medium tracking-[0.15em] text-zinc-600 uppercase w-20 shrink-0">TIME</span>
+                        <span className="inline-flex items-center gap-1.5 text-[13px] text-zinc-400">
+                          <Clock size={11} strokeWidth={1.75} aria-hidden="true" />
+                          <span className="tabular-nums">{liveResult.responseA.meta.durationMs}ms</span>
+                          <ArrowRight size={12} strokeWidth={1.75} className="text-zinc-600" aria-hidden="true" />
+                          <span className="tabular-nums">{liveResult.responseB.meta.durationMs}ms</span>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="mb-3 flex items-center gap-2">
+                  <h2 className="text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">
+                    {mode === "live" ? "Body Changes" : "Detected Changes"}
+                  </h2>
+                  {hasBodyChanges && (
+                    <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500" aria-label={`${changes.length} changes`}>
+                      {changes.length}
+                    </span>
+                  )}
+                </div>
+
+                {loading ? (
+                  <div className="space-y-3" aria-hidden="true">
+                    {[1, 2, 3].map((n) => <div key={n} className="h-16 animate-pulse rounded-lg bg-zinc-900" />)}
+                  </div>
+                ) : !hasBodyChanges && !statusChange ? (
+                  <div className="rounded-lg border border-dashed border-zinc-800 py-12 text-center">
+                    <p className="text-[13px] text-zinc-600">
+                      {hasRisk ? "No body changes detected between the two responses." : "Run an analysis to see detected changes."}
+                    </p>
+                  </div>
+                ) : (
+                  <ul className="divide-y divide-white/[0.05]" aria-label="List of detected changes">
+                    {bodyChanges.map((change, index) => (
+                      <li
+                        key={`${change.path}-${index}`}
+                        className={`border-l-2 py-4 pl-4 transition-colors duration-150 hover:bg-white/[0.02] ${SEV_ROW_BORDER[change.severity] ?? "border-l-zinc-700"} ${!reduced ? "db-fade-up" : ""}`}
+                        style={reduced ? undefined : { animationDelay: rowDelay(index) }}
+                      >
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                          <code className="font-mono text-[13px] font-medium text-zinc-100">{change.path}</code>
+                          <KindTag kind={change.kind} />
+                          <SeverityPip severity={change.severity} />
+                        </div>
+                        <p className="mt-1.5 text-[13px] leading-relaxed text-zinc-500">{change.reason}</p>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <div>
+                <h2 className="mb-3 flex items-center gap-1.5 text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">
+                  <Sparkles size={11} strokeWidth={1.75} aria-hidden="true" />
+                  AI Impact Review
+                </h2>
+                {loading ? (
+                  <div className="flex items-center gap-2 text-[13px] text-zinc-600" aria-live="polite">
+                    <Loader2 size={13} strokeWidth={1.75} className="animate-spin" aria-hidden="true" />
+                    <span>Analyzing impact…</span>
+                  </div>
+                ) : ai ? (
+                  <div className={!reduced ? "db-fade-up" : ""}>
+                    <p className="text-[13px] leading-relaxed text-zinc-300">{ai.summary}</p>
+                    <div className="mt-5 border-t border-white/[0.06] pt-5">
+                      <p className="mb-3 text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">Recommended Actions</p>
+                      <ul className="space-y-3">
+                        {ai.recommendations.map((item) => (
+                          <li key={item} className="flex gap-2.5 text-[13px] text-zinc-400">
+                            <ArrowRight size={13} strokeWidth={1.75} className="mt-px shrink-0 text-zinc-600" aria-hidden="true" />
+                            <span>{item}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-[13px] text-zinc-600">
+                    {hasRisk
+                      ? "No AI key configured. Add GROQ_API_KEY or ANTHROPIC_API_KEY to .env.local to enable impact analysis."
+                      : "AI analysis appears after you run the comparison."}
+                  </p>
+                )}
+              </div>
+            </div>
+          </section>
+
+          <div className="h-16" />
+        </main>
+
+        <footer aria-label="Site footer" className="border-t border-white/[0.05] px-5 py-5 md:px-8">
+          <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 text-[12px] text-zinc-700">
+            <span>DiffBeacon · MIT License</span>
+            <a href="https://github.com/Abubakar-webmaker/diffbeacon" target="_blank" rel="noopener noreferrer"
+              className="transition-colors duration-150 hover:text-zinc-500">
+              github.com/Abubakar-webmaker/diffbeacon
+            </a>
           </div>
-        </section>
-
-        {/* bottom breathing room */}
-        <div className="h-16" />
-      </main>
-
-      {/* ── Footer ─────────────────────────────────────────────────────────── */}
-      <footer className="border-t border-white/[0.05] px-5 py-5 md:px-8">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 text-[12px] text-zinc-700">
-          <span>DiffBeacon · MIT License</span>
-          <a
-            href="https://github.com/Abubakar-webmaker/diffbeacon"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="transition-colors hover:text-zinc-500"
-          >
-            github.com/Abubakar-webmaker/diffbeacon
-          </a>
-        </div>
-      </footer>
-
-    </div>
+        </footer>
+      </div>
+    </>
   );
 }
