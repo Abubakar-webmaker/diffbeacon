@@ -2,6 +2,7 @@
 import tsPlugin from "@typescript-eslint/eslint-plugin";
 import tsParser from "@typescript-eslint/parser";
 import nextPlugin from "@next/eslint-plugin-next";
+import reactHooksPlugin from "eslint-plugin-react-hooks";
 
 /** @type {import("eslint").Linter.Config[]} */
 const config = [
@@ -10,6 +11,7 @@ const config = [
     files: ["**/*.ts", "**/*.tsx"],
     plugins: {
       "@typescript-eslint": tsPlugin,
+      "react-hooks": reactHooksPlugin,
     },
     languageOptions: {
       parser: tsParser,
@@ -19,6 +21,7 @@ const config = [
     },
     rules: {
       ...tsPlugin.configs["flat/recommended"].rules,
+      ...reactHooksPlugin.configs.recommended.rules,
     },
   },
   // Next.js rules

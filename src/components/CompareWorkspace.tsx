@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
   GitBranch,
@@ -25,7 +26,6 @@ import {
   Check,
   X,
 } from "lucide-react";
-import JsonEditor from "@/components/editor/JsonEditor";
 import RequestConfig from "@/components/live/RequestConfig";
 import { useAnimatedScore } from "@/hooks/useAnimatedScore";
 import { useReducedMotion } from "@/hooks/useReducedMotion";
@@ -33,6 +33,15 @@ import { useHistory } from "@/hooks/useHistory";
 import { exportJson, exportMarkdown, downloadFile } from "@/lib/export/report";
 import type { ApiRequestConfig, ApiAnalysisResult } from "@/types/api";
 import type { DiffChange, RiskResult } from "@/types/diff";
+
+const JsonEditor = dynamic(() => import("@/components/editor/JsonEditor"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-[300px] items-center justify-center rounded-xl border border-white/[0.08] bg-[#0d0f14] text-[13px] text-zinc-700">
+      Loading editor…
+    </div>
+  ),
+});
 
 type Mode = "json" | "live" | "contract";
 type Change = { path: string; kind: string; severity: string; reason: string; before?: unknown; after?: unknown };
@@ -102,8 +111,6 @@ const defaultRequest = (): ApiRequestConfig => ({
   auth: { type: "none" },
 });
 
-// ─── Design tokens ────────────────────────────────────────────────────────────
-
 const SEV_TEXT: Record<string, string> = {
   CRITICAL: "text-red-400",
   HIGH:     "text-orange-400",
@@ -136,8 +143,6 @@ const RISK_TEXT: Record<string, string> = {
   "NO CHANGES": "text-zinc-500",
 };
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
 function parseJsonSafely(
   value: string,
   label: "Response A" | "Response B",
@@ -159,8 +164,6 @@ function statusClass(status: number): string {
   return "text-emerald-400";
 }
 
-// ─── Small components ─────────────────────────────────────────────────────────
-
 function SeverityPip({ severity }: { severity: string }) {
   return (
     <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${SEV_TEXT[severity] ?? "text-zinc-500"}`}>
@@ -174,42 +177,27 @@ function KindTag({ kind }: { kind: string }) {
   return <span className="font-mono text-[11px] text-zinc-500">{kind}</span>;
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
-
 export default function CompareWorkspace() {
-  // ── Mode ──
   const [mode, setMode] = useState<Mode>("json");
-
-  // ── JSON mode state ──
   const [before, setBefore] = useState(sampleA);
   const [after, setAfter]   = useState(sampleB);
-
-  // ── Contract mode state ──
   const [contractA, setContractA] = useState(sampleContractA);
   const [contractB, setContractB] = useState(sampleContractB);
   const [contractDirection, setContractDirection] = useState<"REQUEST" | "RESPONSE">("RESPONSE");
-
-  // ── Live mode state ──
   const [reqA, setReqA] = useState<ApiRequestConfig>(() => defaultRequest());
   const [reqB, setReqB] = useState<ApiRequestConfig>(() => defaultRequest());
   const [liveResult, setLiveResult] = useState<ApiAnalysisResult | null>(null);
   const [statusComparison, setStatusComparison] = useState<StatusComparison | null>(null);
-
-  // ── Shared result state ──
   const [changes, setChanges] = useState<Change[]>([]);
   const [risk, setRisk]       = useState<{ score: number; label: string } | null>(null);
   const [ai, setAi]           = useState<Analysis>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState("");
-
-  // ── Animation state ──
   const reduced                     = useReducedMotion();
   const [entered, setEntered]       = useState(false);
   const [resultsKey, setResultsKey] = useState(0);
   const animatedScore               = useAnimatedScore(risk?.score ?? 0);
   const resultsRef                  = useRef<HTMLElement>(null);
-
-  // ── History / Share / Export state ──
   const { entries: historyEntries, add: addHistory, remove: removeHistory, clear: clearHistory } = useHistory();
   const [showHistory, setShowHistory]   = useState(false);
   const [shareUrl, setShareUrl]         = useState<string | null>(null);
@@ -228,98 +216,66 @@ export default function CompareWorkspace() {
     safe:     changes.filter((c) => c.severity === "LOW" || c.severity === "SAFE").length,
   }), [changes]);
 
-  // ── JSON analyze ──
   async function analyzeJson() {
     const parsedA = parseJsonSafely(before, "Response A");
     const parsedB = parseJsonSafely(after,  "Response B");
     if (!parsedA.ok) { setError(parsedA.message); return; }
     if (!parsedB.ok) { setError(parsedB.message); return; }
-
     const res  = await fetch("/api/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ before: parsedA.value, after: parsedB.value, ai: true }),
     });
-    const data = await res.json() as {
-      changes: Change[];
-      risk: { score: number; label: string };
-      ai?: { summary: string; recommendations: string[] } | null;
-      error?: string;
-    };
+    const data = await res.json() as { changes: Change[]; risk: { score: number; label: string }; ai?: { summary: string; recommendations: string[] } | null; error?: string };
     if (!res.ok) throw new Error(data.error ?? "Analysis failed");
     setChanges(data.changes);
     setRisk(data.risk);
     setAi(data.ai ? { summary: data.ai.summary, recommendations: data.ai.recommendations } : null);
   }
 
-  // ── Live analyze ──
   async function analyzeLive() {
     if (!reqA.url.trim()) { setError("Request A URL is required."); return; }
     if (!reqB.url.trim()) { setError("Request B URL is required."); return; }
-
     const res  = await fetch("/api/request", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ requestA: reqA, requestB: reqB, ai: true }),
     });
-    const data = await res.json() as {
-      result: ApiAnalysisResult;
-      changes: Change[];
-      risk: { score: number; label: string };
-      ai?: { summary: string; recommendations: string[] } | null;
-      error?: string;
-    };
+    const data = await res.json() as { result: ApiAnalysisResult; changes: Change[]; risk: { score: number; label: string }; ai?: { summary: string; recommendations: string[] } | null; error?: string };
     if (!res.ok) throw new Error(data.error ?? "Request failed");
     setLiveResult(data.result);
     setChanges(data.changes);
     setRisk(data.risk);
     setAi(data.ai ? { summary: data.ai.summary, recommendations: data.ai.recommendations } : null);
-
-    // Derive status comparison from the result metadata
     const metaA = data.result.responseA.meta;
     const metaB = data.result.responseB.meta;
     if (metaA.status !== metaB.status) {
-      setStatusComparison({
-        changed: true,
-        baseline: metaA.status,
-        candidate: metaB.status,
-        baselineText: metaA.statusText,
-        candidateText: metaB.statusText,
-        severity: data.changes.find((c) => c.kind === "STATUS_CHANGED")?.severity ?? "MEDIUM",
-      });
+      setStatusComparison({ changed: true, baseline: metaA.status, candidate: metaB.status, baselineText: metaA.statusText, candidateText: metaB.statusText, severity: data.changes.find((c) => c.kind === "STATUS_CHANGED")?.severity ?? "MEDIUM" });
     } else {
       setStatusComparison({ changed: false });
     }
   }
 
-  // ── Contract analyze ──
   async function analyzeContract() {
     if (!contractA.trim()) { setError("Baseline contract is required."); return; }
     if (!contractB.trim()) { setError("Candidate contract is required."); return; }
-
     const res = await fetch("/api/contract/diff", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ baseline: contractA, candidate: contractB, direction: contractDirection, ai: true }),
     });
-    const data = await res.json() as {
-      changes: Change[];
-      risk: { score: number; label: string };
-      ai?: { summary: string; recommendations: string[] } | null;
-      error?: string;
-      code?: string;
-    };
+    const data = await res.json() as { changes: Change[]; risk: { score: number; label: string }; ai?: { summary: string; recommendations: string[] } | null; error?: string; code?: string };
     if (!res.ok) {
       const codeMap: Record<string, string> = {
-        INVALID_JSON:                "Invalid JSON — check your contract for syntax errors.",
-        INVALID_YAML:                "YAML is not supported. Convert your contract to JSON before pasting.",
-        INVALID_SCHEMA:              "Invalid contract document. Provide an OpenAPI 3.x or JSON Schema object.",
-        UNSUPPORTED_FORMAT:          "Unsupported contract format. Paste an OpenAPI 3.x or JSON Schema document.",
+        INVALID_JSON: "Invalid JSON — check your contract for syntax errors.",
+        INVALID_YAML: "YAML is not supported. Convert your contract to JSON before pasting.",
+        INVALID_SCHEMA: "Invalid contract document. Provide an OpenAPI 3.x or JSON Schema object.",
+        UNSUPPORTED_FORMAT: "Unsupported contract format. Paste an OpenAPI 3.x or JSON Schema document.",
         UNSUPPORTED_OPENAPI_VERSION: "Unsupported OpenAPI version. Only OpenAPI 3.x is supported.",
-        MISSING_SCHEMA:              "No schema found in the contract document.",
-        EXTERNAL_REF:                "External $ref is not supported. Inline all external references before analyzing.",
-        CIRCULAR_REF:                "Circular $ref detected. Remove circular references and try again.",
-        INPUT_TOO_LARGE:             "Contract document is too large. Reduce the document size and try again.",
+        MISSING_SCHEMA: "No schema found in the contract document.",
+        EXTERNAL_REF: "External $ref is not supported. Inline all external references before analyzing.",
+        CIRCULAR_REF: "Circular $ref detected. Remove circular references and try again.",
+        INPUT_TOO_LARGE: "Contract document is too large. Reduce the document size and try again.",
       };
       throw new Error(data.code ? (codeMap[data.code] ?? data.error ?? "Unable to analyze contract.") : (data.error ?? "Unable to analyze contract."));
     }
@@ -328,7 +284,6 @@ export default function CompareWorkspace() {
     setAi(data.ai ? { summary: data.ai.summary, recommendations: data.ai.recommendations } : null);
   }
 
-  // ── Unified analyze ──
   async function analyze() {
     setError("");
     setLoading(true);
@@ -346,7 +301,6 @@ export default function CompareWorkspace() {
     }
   }
 
-  // Record history after results arrive
   useEffect(() => {
     if (resultsKey > 0 && risk) {
       const breaking = changes.filter((c) => ["CRITICAL", "HIGH"].includes(c.severity)).length;
@@ -363,13 +317,12 @@ export default function CompareWorkspace() {
           : "JSON diff",
       });
     }
-  }, [resultsKey]); // intentionally omit deps — runs only when resultsKey increments
+  }, [resultsKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (resultsKey > 0) resultsRef.current?.focus({ preventScroll: false });
   }, [resultsKey]);
 
-  // ── Share ──
   async function handleShare() {
     if (!risk) return;
     setShareLoading(true);
@@ -394,17 +347,16 @@ export default function CompareWorkspace() {
     }
   }
 
-  // ── Export ──
   function handleExportJson() {
     if (!risk) return;
     downloadFile(exportJson({ mode, changes: changes as DiffChange[], risk: risk as RiskResult, ai }), "diffbeacon-report.json", "application/json");
   }
+
   function handleExportMarkdown() {
     if (!risk) return;
     downloadFile(exportMarkdown({ mode, changes: changes as DiffChange[], risk: risk as RiskResult, ai }), "diffbeacon-report.md", "text/markdown");
   }
 
-  // Reset live result when switching modes
   function switchMode(m: Mode) {
     setMode(m);
     setError("");
@@ -420,13 +372,10 @@ export default function CompareWorkspace() {
 
   const bodyChanges = changes.filter((c) => c.kind !== "STATUS_CHANGED");
   const hasBodyChanges = bodyChanges.length > 0;
-  const hasRisk    = risk !== null;
-
-  // ── Separate status change from body changes for display ──
+  const hasRisk = risk !== null;
   const statusChange = changes.find((c) => c.kind === "STATUS_CHANGED") ?? null;
 
-  // ── Contract-specific change metadata helpers ──
-  type ContractChange = Change & { compatibility?: string; fieldRequirement?: string; requirementBefore?: string; requirementAfter?: string; enumValue?: unknown; direction?: string; };
+  type ContractChange = Change & { compatibility?: string; fieldRequirement?: string; requirementBefore?: string; requirementAfter?: string; enumValue?: unknown; direction?: string };
   function compatBadge(c: ContractChange): string | null {
     if (!c.compatibility) return null;
     if (c.compatibility === "BREAKING") return "BREAKING";
@@ -462,7 +411,6 @@ export default function CompareWorkspace() {
           transition: "opacity 350ms cubic-bezier(0.16,1,0.3,1), transform 350ms cubic-bezier(0.16,1,0.3,1)",
         }}
       >
-        {/* ── Header ── */}
         <header className="sticky top-0 z-50 border-b border-white/[0.06] bg-[#080a0f]/95 backdrop-blur-sm">
           <div className="mx-auto flex h-12 max-w-7xl items-center justify-between px-5 md:px-8">
             <Link href="/" className="flex items-center gap-2 transition-opacity duration-150 hover:opacity-80">
@@ -484,8 +432,6 @@ export default function CompareWorkspace() {
         </header>
 
         <main id="main-content" className="mx-auto max-w-7xl px-5 md:px-8">
-
-          {/* ── Hero ── */}
           <div className="pb-6 pt-10">
             <p className="mb-2 text-[11px] font-medium tracking-[0.2em] text-zinc-600 uppercase" aria-hidden="true">
               API Response Analysis
@@ -498,50 +444,25 @@ export default function CompareWorkspace() {
             </p>
           </div>
 
-          {/* ── Mode selector ── */}
           <div className="mb-6 flex items-center gap-1 rounded-lg border border-white/[0.06] bg-zinc-900/60 p-1 w-fit" role="tablist" aria-label="Comparison mode">
-            <button
-              role="tab"
-              aria-selected={mode === "json"}
-              onClick={() => switchMode("json")}
-              className={`inline-flex items-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-medium transition-colors duration-150 ${
-                mode === "json"
-                  ? "bg-zinc-800 text-zinc-100 shadow-sm"
-                  : "text-zinc-500 hover:text-zinc-300"
-              }`}
-            >
-              <FileJson size={13} strokeWidth={1.75} aria-hidden="true" />
-              JSON
-            </button>
-            <button
-              role="tab"
-              aria-selected={mode === "live"}
-              onClick={() => switchMode("live")}
-              className={`inline-flex items-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-medium transition-colors duration-150 ${
-                mode === "live"
-                  ? "bg-zinc-800 text-zinc-100 shadow-sm"
-                  : "text-zinc-500 hover:text-zinc-300"
-              }`}
-            >
-              <Globe size={13} strokeWidth={1.75} aria-hidden="true" />
-              Live API
-            </button>
-            <button
-              role="tab"
-              aria-selected={mode === "contract"}
-              onClick={() => switchMode("contract")}
-              className={`inline-flex items-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-medium transition-colors duration-150 ${
-                mode === "contract"
-                  ? "bg-zinc-800 text-zinc-100 shadow-sm"
-                  : "text-zinc-500 hover:text-zinc-300"
-              }`}
-            >
-              <FileCode2 size={13} strokeWidth={1.75} aria-hidden="true" />
-              Contract
-            </button>
+            {(["json", "live", "contract"] as const).map((m) => (
+              <button
+                key={m}
+                role="tab"
+                aria-selected={mode === m}
+                onClick={() => switchMode(m)}
+                className={`inline-flex items-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-medium transition-colors duration-150 ${
+                  mode === m ? "bg-zinc-800 text-zinc-100 shadow-sm" : "text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                {m === "json" && <FileJson size={13} strokeWidth={1.75} aria-hidden="true" />}
+                {m === "live" && <Globe size={13} strokeWidth={1.75} aria-hidden="true" />}
+                {m === "contract" && <FileCode2 size={13} strokeWidth={1.75} aria-hidden="true" />}
+                {m === "json" ? "JSON" : m === "live" ? "Live API" : "Contract"}
+              </button>
+            ))}
           </div>
 
-          {/* ── Input area ── */}
           {mode === "json" ? (
             <section aria-label="JSON comparison editors">
               <div className="relative grid gap-3 lg:grid-cols-2">
@@ -603,7 +524,6 @@ export default function CompareWorkspace() {
             </section>
           )}
 
-          {/* ── Action bar ── */}
           <div className="mt-4 flex items-center justify-between gap-4 border-t border-white/[0.05] pt-4">
             <p className="text-[13px] text-zinc-600">
               {mode === "json" ? "Paste two JSON responses and click Analyze." : mode === "live" ? "Configure both endpoints and click Fetch & Analyze." : "Paste two OpenAPI 3.x or JSON Schema contracts and click Analyze."}
@@ -626,7 +546,6 @@ export default function CompareWorkspace() {
             </button>
           </div>
 
-          {/* ── Error ── */}
           {error && (
             <div role="alert" aria-live="assertive" className="mt-4 flex items-start gap-3 rounded-lg border border-red-900/50 bg-red-950/20 px-4 py-3 text-[13px] text-red-400">
               <AlertCircle size={15} strokeWidth={1.75} className="mt-px shrink-0" aria-hidden="true" />
@@ -634,7 +553,6 @@ export default function CompareWorkspace() {
             </div>
           )}
 
-          {/* ── Live metadata ── */}
           {mode === "live" && liveResult && (
             <div className="mt-6 grid gap-3 rounded-xl border border-white/[0.06] p-4 sm:grid-cols-2">
               {(["A", "B"] as const).map((side) => {
@@ -667,7 +585,6 @@ export default function CompareWorkspace() {
             </div>
           )}
 
-          {/* ── Results ── */}
           <section
             key={resultsKey}
             ref={resultsRef}
@@ -676,7 +593,6 @@ export default function CompareWorkspace() {
             aria-live="polite"
             className={`mt-10 outline-none ${resultsKey > 0 && !reduced ? "db-enter" : ""}`}
           >
-            {/* Risk row */}
             <div className="flex flex-wrap items-baseline gap-x-8 gap-y-3 border-b border-white/[0.06] pb-6">
               <div>
                 <p className="inline-flex items-center gap-1.5 text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">
@@ -712,20 +628,13 @@ export default function CompareWorkspace() {
               </div>
             </div>
 
-            {/* Changes + AI */}
             <div className="mt-6 grid gap-8 lg:grid-cols-[1fr_320px]">
               <div>
-                {/* ── Response Metadata (live mode only) ── */}
                 {mode === "live" && liveResult && (statusComparison || hasBodyChanges) && (
                   <div className="mb-6">
                     <p className="mb-3 text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">Response Metadata</p>
                     <div className="divide-y divide-white/[0.05] rounded-lg border border-white/[0.06]">
-                      {/* Status row */}
-                      <div className={`flex items-center gap-3 px-4 py-3 border-l-2 ${
-                        statusComparison?.changed
-                          ? (SEV_ROW_BORDER[statusComparison.severity] ?? "border-l-zinc-700")
-                          : "border-l-zinc-800"
-                      }`}>
+                      <div className={`flex items-center gap-3 px-4 py-3 border-l-2 ${statusComparison?.changed ? (SEV_ROW_BORDER[statusComparison.severity] ?? "border-l-zinc-700") : "border-l-zinc-800"}`}>
                         <span className="text-[10px] font-medium tracking-[0.15em] text-zinc-600 uppercase w-20 shrink-0">STATUS</span>
                         {statusComparison?.changed ? (
                           <div className="flex flex-wrap items-center gap-2">
@@ -744,7 +653,6 @@ export default function CompareWorkspace() {
                           </span>
                         )}
                       </div>
-                      {/* Response time row */}
                       <div className="flex items-center gap-3 px-4 py-3 border-l-2 border-l-zinc-800">
                         <span className="text-[10px] font-medium tracking-[0.15em] text-zinc-600 uppercase w-20 shrink-0">TIME</span>
                         <span className="inline-flex items-center gap-1.5 text-[13px] text-zinc-400">
@@ -870,7 +778,6 @@ export default function CompareWorkspace() {
             </div>
           </section>
 
-          {/* ── Share / Export toolbar ── */}
           {hasRisk && (
             <div className="mt-8 flex flex-wrap items-center gap-3 border-t border-white/[0.05] pt-5">
               <button
@@ -899,16 +806,13 @@ export default function CompareWorkspace() {
                 <Download size={12} strokeWidth={1.75} aria-hidden="true" />
                 Export Markdown
               </button>
-              {shareError && (
-                <span className="text-[12px] text-red-400">{shareError}</span>
-              )}
+              {shareError && <span className="text-[12px] text-red-400">{shareError}</span>}
               {shareUrl && !shareCopied && (
                 <span className="font-mono text-[11px] text-zinc-500 truncate max-w-xs">{shareUrl}</span>
               )}
             </div>
           )}
 
-          {/* ── History panel ── */}
           <div className="mt-8 border-t border-white/[0.05] pt-5">
             <div className="flex items-center justify-between">
               <button
