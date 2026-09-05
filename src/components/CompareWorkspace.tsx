@@ -290,8 +290,22 @@ export default function CompareWorkspace() {
       risk: { score: number; label: string };
       ai?: { summary: string; recommendations: string[] } | null;
       error?: string;
+      code?: string;
     };
-    if (!res.ok) throw new Error(data.error ?? "Contract analysis failed");
+    if (!res.ok) {
+      const codeMap: Record<string, string> = {
+        INVALID_JSON:                "Invalid JSON — check your contract for syntax errors.",
+        INVALID_YAML:                "YAML is not supported. Convert your contract to JSON before pasting.",
+        INVALID_SCHEMA:              "Invalid contract document. Provide an OpenAPI 3.x or JSON Schema object.",
+        UNSUPPORTED_FORMAT:          "Unsupported contract format. Paste an OpenAPI 3.x or JSON Schema document.",
+        UNSUPPORTED_OPENAPI_VERSION: "Unsupported OpenAPI version. Only OpenAPI 3.x is supported.",
+        MISSING_SCHEMA:              "No schema found in the contract document.",
+        EXTERNAL_REF:                "External $ref is not supported. Inline all external references before analyzing.",
+        CIRCULAR_REF:                "Circular $ref detected. Remove circular references and try again.",
+        INPUT_TOO_LARGE:             "Contract document is too large. Reduce the document size and try again.",
+      };
+      throw new Error(data.code ? (codeMap[data.code] ?? data.error ?? "Unable to analyze contract.") : (data.error ?? "Unable to analyze contract."));
+    }
     setChanges(data.changes);
     setRisk(data.risk);
     setAi(data.ai ? { summary: data.ai.summary, recommendations: data.ai.recommendations } : null);
@@ -671,7 +685,7 @@ export default function CompareWorkspace() {
 
                 <div className="mb-3 flex items-center gap-2">
                   <h2 className="text-[10px] font-medium tracking-[0.2em] text-zinc-600 uppercase">
-                    {mode === "live" ? "Body Changes" : "Detected Changes"}
+                    {mode === "live" ? "Body Changes" : mode === "contract" ? "Contract Changes" : "Detected Changes"}
                   </h2>
                   {hasBodyChanges && (
                     <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500" aria-label={`${changes.length} changes`}>
@@ -687,25 +701,60 @@ export default function CompareWorkspace() {
                 ) : !hasBodyChanges && !statusChange ? (
                   <div className="rounded-lg border border-dashed border-zinc-800 py-12 text-center">
                     <p className="text-[13px] text-zinc-600">
-                      {hasRisk ? "No body changes detected between the two responses." : "Run an analysis to see detected changes."}
+                      {hasRisk
+                        ? mode === "contract"
+                          ? "No contract changes detected between the two schemas."
+                          : "No body changes detected between the two responses."
+                        : "Run an analysis to see detected changes."}
                     </p>
                   </div>
                 ) : (
                   <ul className="divide-y divide-white/[0.05]" aria-label="List of detected changes">
-                    {bodyChanges.map((change, index) => (
-                      <li
-                        key={`${change.path}-${index}`}
-                        className={`border-l-2 py-4 pl-4 transition-colors duration-150 hover:bg-white/[0.02] ${SEV_ROW_BORDER[change.severity] ?? "border-l-zinc-700"} ${!reduced ? "db-fade-up" : ""}`}
-                        style={reduced ? undefined : { animationDelay: rowDelay(index) }}
-                      >
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                          <code className="font-mono text-[13px] font-medium text-zinc-100">{change.path}</code>
-                          <KindTag kind={change.kind} />
-                          <SeverityPip severity={change.severity} />
-                        </div>
-                        <p className="mt-1.5 text-[13px] leading-relaxed text-zinc-500">{change.reason}</p>
-                      </li>
-                    ))}
+                    {bodyChanges.map((change, index) => {
+                      const cc = change as ContractChange;
+                      const badge = mode === "contract" ? compatBadge(cc) : null;
+                      return (
+                        <li
+                          key={`${change.path}-${index}`}
+                          className={`border-l-2 py-4 pl-4 transition-colors duration-150 hover:bg-white/[0.02] ${SEV_ROW_BORDER[change.severity] ?? "border-l-zinc-700"} ${!reduced ? "db-fade-up" : ""}`}
+                          style={reduced ? undefined : { animationDelay: rowDelay(index) }}
+                        >
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                            <code className="font-mono text-[13px] font-medium text-zinc-100">{change.path}</code>
+                            <KindTag kind={change.kind} />
+                            <SeverityPip severity={change.severity} />
+                            {badge && (
+                              <span className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide ${COMPAT_TEXT[badge]} ${COMPAT_BG[badge]}`}>
+                                {badge}
+                              </span>
+                            )}
+                            {mode === "contract" && cc.fieldRequirement && cc.fieldRequirement !== "UNKNOWN" && (
+                              <span className="rounded border border-zinc-700/60 bg-zinc-800/60 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500">
+                                {cc.fieldRequirement}
+                              </span>
+                            )}
+                            {mode === "contract" && cc.requirementBefore && cc.requirementAfter && (
+                              <span className="inline-flex items-center gap-1 text-[10px] text-zinc-600">
+                                <span className="text-zinc-500">{cc.requirementBefore}</span>
+                                <ArrowRight size={10} strokeWidth={1.75} aria-hidden="true" />
+                                <span className="text-zinc-500">{cc.requirementAfter}</span>
+                              </span>
+                            )}
+                            {mode === "contract" && change.kind === "ENUM_VALUE_REMOVED" && cc.enumValue !== undefined && (
+                              <code className="rounded bg-red-950/40 px-1.5 py-0.5 font-mono text-[11px] text-red-400">
+                                -{String(cc.enumValue)}
+                              </code>
+                            )}
+                            {mode === "contract" && change.kind === "ENUM_VALUE_ADDED" && cc.enumValue !== undefined && (
+                              <code className="rounded bg-emerald-950/30 px-1.5 py-0.5 font-mono text-[11px] text-emerald-400">
+                                +{String(cc.enumValue)}
+                              </code>
+                            )}
+                          </div>
+                          <p className="mt-1.5 text-[13px] leading-relaxed text-zinc-500">{change.reason}</p>
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
               </div>
