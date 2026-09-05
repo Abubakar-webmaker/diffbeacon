@@ -23,13 +23,15 @@ JSON Response A  +  JSON Response B
    Deterministic Diff Engine
               ↓
      Change Classification
-     (ADDED / REMOVED / CHANGED / TYPE_CHANGED / ARRAY_LENGTH_CHANGED)
+     (ADDED / REMOVED / CHANGED / TYPE_CHANGED / ARRAY_LENGTH_CHANGED / ...)
               ↓
         Risk Analysis
         (score 0–100, label LOW / MEDIUM / HIGH / CRITICAL)
               ↓
      AI Impact Explanation
      (optional — Groq or Claude)
+              ↓
+     Share / Export / History
 ```
 
 The deterministic engine is the source of truth. AI explains the detected facts; it does not invent the diff.
@@ -39,6 +41,8 @@ The deterministic engine is the source of truth. AI explains the detected facts;
 ## Features
 
 - JSON response comparison (paste two responses, click Analyze)
+- Live API mode — fetch two real endpoints server-side and diff the responses
+- OpenAPI / JSON Schema contract diff — detect breaking schema changes
 - Detects added, removed, and changed fields
 - Type-change detection (`number` → `string`, `object` → `array`, etc.)
 - Fully recursive — handles arbitrarily nested JSON
@@ -48,6 +52,12 @@ The deterministic engine is the source of truth. AI explains the detected facts;
 - AI impact analysis via Groq (development) or Claude (production)
 - Server-side AI calls — no API keys exposed to the browser
 - Works without any AI key — deterministic diff always runs
+- **Share** — generate a shareable link for any analysis result (24 h TTL)
+- **Export** — download results as JSON or Markdown
+- **History** — last 50 analyses stored locally in the browser
+- **CLI** — run diffs from the terminal or CI pipelines
+- Rate limiting — per-IP sliding window, configurable via env vars
+- Structured server-side logging — safe fields only, no secrets
 
 ---
 
@@ -85,6 +95,37 @@ The AI layer then explains what these changes mean for downstream consumers and 
 
 ---
 
+## CLI
+
+Run diffs from the terminal or CI pipelines without starting the web server:
+
+```bash
+# JSON diff
+npm run diffbeacon -- baseline.json candidate.json
+
+# Markdown output
+npm run diffbeacon -- baseline.json candidate.json --format markdown
+
+# Exit 1 if breaking changes detected (for CI gates)
+npm run diffbeacon -- baseline.json candidate.json --fail-on breaking
+
+# OpenAPI / JSON Schema contract diff
+npm run diffbeacon -- contract-v1.json contract-v2.json --contract
+npm run diffbeacon -- contract-v1.json contract-v2.json --contract --direction REQUEST
+```
+
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| `0` | Success / no breaking changes |
+| `1` | Breaking changes detected (only when `--fail-on breaking`) |
+| `2` | Invalid input or execution error |
+
+Requires `tsx` (installed as a dev dependency). Run via `npm run diffbeacon -- ...` or `npx tsx cli/diffbeacon.mjs ...`.
+
+---
+
 ## Tech stack
 
 | Layer | Technology |
@@ -97,6 +138,7 @@ The AI layer then explains what these changes mean for downstream consumers and 
 | AI — development | Groq (`llama-3.3-70b-versatile`) |
 | AI — production | Anthropic Claude (`claude-sonnet-4`) |
 | Runtime | Node.js ≥ 20.9 |
+| CLI runner | tsx |
 
 ---
 
@@ -119,14 +161,22 @@ The deterministic diff works immediately with no configuration. Add an AI key to
 ## Environment variables
 
 ```bash
-# Groq — development / free tier
-# If set, Groq takes priority over Claude
+# Groq — development / free tier (takes priority if set)
 GROQ_API_KEY=
 GROQ_MODEL=llama-3.3-70b-versatile
 
 # Anthropic Claude — production provider
 ANTHROPIC_API_KEY=
 ANTHROPIC_MODEL=claude-sonnet-4-20250514
+
+# Rate limiting (per IP, sliding window)
+RATE_LIMIT_MAX=30
+RATE_LIMIT_WINDOW_MS=60000
+# RATE_LIMIT_DISABLED=true   # disable in local dev
+
+# Share store
+SHARE_TTL_MS=86400000        # 24 hours
+SHARE_MAX_ENTRIES=1000
 ```
 
 Copy `.env.example` to `.env.local` and fill in your keys locally.
@@ -142,12 +192,25 @@ AI provider selection is automatic: if `GROQ_API_KEY` is set it is used first; o
 ## Testing
 
 ```bash
-npm run test       # 40 automated diff-engine unit tests
+npm run test       # 489 automated unit tests
 npm run typecheck  # TypeScript strict check
 npm run lint       # ESLint (flat config, ESLint 9)
+npm run build      # Production build
 ```
 
-The test suite covers the full deterministic diff engine: identical inputs, added/removed/changed/type-changed fields, nested objects, arrays, null handling, mixed changes, risk score boundaries, edge cases, and deterministic output verification.
+The test suite covers: diff engine, risk scoring, compatibility classification, enum diff, contract diff, API client (SSRF, validation, headers), share store, export (JSON + Markdown), rate limiter, logger, error helpers, and CLI logic.
+
+---
+
+## CI
+
+A GitHub Actions workflow is included at `.github/workflows/ci.yml`. It runs on every push and pull request to `main`:
+
+1. `npm run typecheck`
+2. `npm run lint`
+3. `npm run test`
+4. `npm run build`
+5. CLI smoke test (JSON diff + `--fail-on breaking` exit code verification)
 
 ---
 
@@ -169,10 +232,10 @@ Risk score is the maximum severity weight across all detected changes, capped at
 | Version | Scope |
 |---|---|
 | **V1** ✅ | JSON response comparison, deterministic diff, risk scoring, AI impact analysis |
-| V1.1 | Secure live API request proxy — compare real endpoints directly, with SSRF protection |
-| V1.2 | Shareable reports and comparison history |
-| V2 | Provider switching UI, account features, persistent history |
-| V3 | OpenAPI contract validation, GitHub / CI integration, multi-model consensus |
+| **V1.1** ✅ | Live API request proxy (SSRF-protected), OpenAPI/JSON Schema contract diff |
+| **V1.2** ✅ | Share, History, Export (JSON + Markdown), CLI, CI workflow, rate limiting |
+| V2 | Provider switching UI, account features, persistent history (database) |
+| V3 | GitHub / CI deep integration, multi-model consensus, OpenAPI full coverage |
 
 ---
 
@@ -180,7 +243,11 @@ Risk score is the maximum severity weight across all detected changes, capped at
 
 - API keys are read server-side only and never sent to the browser.
 - `.env.local` must never be committed to version control.
-- V1.1 live API proxying will require SSRF protection before it ships — arbitrary URLs will not be forwarded without validation.
+- Live API proxying uses SSRF protection — private/loopback/link-local addresses are blocked.
+- Share IDs are cryptographically random (16 bytes / 32 hex chars).
+- Shared payloads never include auth headers, bearer tokens, or API keys.
+- Rate limiting is applied per IP on all API routes.
+- Structured logging never records secrets, request bodies, or auth headers.
 - If you discover a security issue, please open a private GitHub issue or contact the maintainer directly before disclosing publicly.
 
 ---

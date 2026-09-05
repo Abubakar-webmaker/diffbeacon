@@ -36,26 +36,43 @@ function parseResponse(text: string, provider: AIAnalysis["provider"]): AIAnalys
   }
 }
 
+const AI_TIMEOUT_MS = 20_000;
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("AI provider timed out")), ms),
+    ),
+  ]);
+}
+
 async function analyzeWithGroq(input: { changes: DiffChange[]; risk: RiskResult }): Promise<AIAnalysis> {
   const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
-  const response = await client.chat.completions.create({
-    model: process.env.GROQ_MODEL ?? "qwen/qwen3.8-27b",
-    max_tokens: 600,
-    temperature: 0,
-    response_format: { type: "json_object" },
-    messages: [{ role: "user", content: PROMPT(input) }],
-  });
+  const response = await withTimeout(
+    client.chat.completions.create({
+      model: process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
+      max_tokens: 600,
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [{ role: "user", content: PROMPT(input) }],
+    }),
+    AI_TIMEOUT_MS,
+  );
   return parseResponse(response.choices[0]?.message?.content ?? "", "groq");
 }
 
 async function analyzeWithClaude(input: { changes: DiffChange[]; risk: RiskResult }): Promise<AIAnalysis> {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const response = await client.messages.create({
-    model: process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-20250514",
-    max_tokens: 600,
-    temperature: 0,
-    messages: [{ role: "user", content: PROMPT(input) }],
-  });
+  const response = await withTimeout(
+    client.messages.create({
+      model: process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-20250514",
+      max_tokens: 600,
+      temperature: 0,
+      messages: [{ role: "user", content: PROMPT(input) }],
+    }),
+    AI_TIMEOUT_MS,
+  );
   const text = response.content
     .filter((b) => b.type === "text")
     .map((b) => b.text)
@@ -63,15 +80,21 @@ async function analyzeWithClaude(input: { changes: DiffChange[]; risk: RiskResul
   return parseResponse(text, "anthropic");
 }
 
-export async function analyzeWithAI(input: { changes: DiffChange[]; risk: RiskResult }): Promise<AIAnalysis> {
-  if (process.env.GROQ_API_KEY) return analyzeWithGroq(input);
-  if (process.env.ANTHROPIC_API_KEY) return analyzeWithClaude(input);
-  return {
-    provider: "groq",
-    summary: "No AI provider configured. Deterministic analysis is complete; add GROQ_API_KEY or ANTHROPIC_API_KEY to enable AI explanations.",
-    recommendations: [
-      "Review CRITICAL/HIGH changes first.",
-      "Confirm removed properties and type changes with downstream consumers.",
-    ],
-  };
+/**
+ * Attempts AI analysis. Returns null on any failure so the deterministic
+ * diff result is always returned to the caller regardless of AI availability.
+ * Never exposes provider API keys or internal error details.
+ */
+export async function analyzeWithAI(
+  input: { changes: DiffChange[]; risk: RiskResult },
+): Promise<AIAnalysis | null> {
+  if (!process.env.GROQ_API_KEY && !process.env.ANTHROPIC_API_KEY) return null;
+  try {
+    if (process.env.GROQ_API_KEY) return await analyzeWithGroq(input);
+    if (process.env.ANTHROPIC_API_KEY) return await analyzeWithClaude(input);
+  } catch {
+    // AI failure must never crash the analysis — return null silently.
+    // The caller will surface "AI explanation unavailable" to the user.
+  }
+  return null;
 }

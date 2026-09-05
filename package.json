@@ -9,7 +9,8 @@
     "start": "next start",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "diffbeacon": "tsx cli/diffbeacon.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.56.0",
@@ -30,6 +31,7 @@
     "eslint": "^9.35.0",
     "eslint-config-next": "^15.5.3",
     "tailwindcss": "^4.1.13",
+    "tsx": "^4.23.13",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   },

@@ -18,12 +18,21 @@ import {
   Clock,
   ArrowRightLeft,
   FileCode2,
+  Share2,
+  Download,
+  History,
+  Trash2,
+  Check,
+  X,
 } from "lucide-react";
 import JsonEditor from "@/components/editor/JsonEditor";
 import RequestConfig from "@/components/live/RequestConfig";
 import { useAnimatedScore } from "@/hooks/useAnimatedScore";
 import { useReducedMotion } from "@/hooks/useReducedMotion";
+import { useHistory } from "@/hooks/useHistory";
+import { exportJson, exportMarkdown, downloadFile } from "@/lib/export/report";
 import type { ApiRequestConfig, ApiAnalysisResult } from "@/types/api";
+import type { DiffChange, RiskResult } from "@/types/diff";
 
 type Mode = "json" | "live" | "contract";
 type Change = { path: string; kind: string; severity: string; reason: string; before?: unknown; after?: unknown };
@@ -85,7 +94,7 @@ const sampleB = `{
   "active": true
 }`;
 
-const defaultRequest = (label: "A" | "B"): ApiRequestConfig => ({
+const defaultRequest = (): ApiRequestConfig => ({
   url: "",
   method: "GET",
   headers: {},
@@ -181,8 +190,8 @@ export default function CompareWorkspace() {
   const [contractDirection, setContractDirection] = useState<"REQUEST" | "RESPONSE">("RESPONSE");
 
   // ── Live mode state ──
-  const [reqA, setReqA] = useState<ApiRequestConfig>(() => defaultRequest("A"));
-  const [reqB, setReqB] = useState<ApiRequestConfig>(() => defaultRequest("B"));
+  const [reqA, setReqA] = useState<ApiRequestConfig>(() => defaultRequest());
+  const [reqB, setReqB] = useState<ApiRequestConfig>(() => defaultRequest());
   const [liveResult, setLiveResult] = useState<ApiAnalysisResult | null>(null);
   const [statusComparison, setStatusComparison] = useState<StatusComparison | null>(null);
 
@@ -199,6 +208,14 @@ export default function CompareWorkspace() {
   const [resultsKey, setResultsKey] = useState(0);
   const animatedScore               = useAnimatedScore(risk?.score ?? 0);
   const resultsRef                  = useRef<HTMLElement>(null);
+
+  // ── History / Share / Export state ──
+  const { entries: historyEntries, add: addHistory, remove: removeHistory, clear: clearHistory } = useHistory();
+  const [showHistory, setShowHistory]   = useState(false);
+  const [shareUrl, setShareUrl]         = useState<string | null>(null);
+  const [shareCopied, setShareCopied]   = useState(false);
+  const [shareLoading, setShareLoading] = useState(false);
+  const [shareError, setShareError]     = useState("");
 
   useEffect(() => {
     const id = requestAnimationFrame(() => setEntered(true));
@@ -315,6 +332,8 @@ export default function CompareWorkspace() {
   async function analyze() {
     setError("");
     setLoading(true);
+    setShareUrl(null);
+    setShareError("");
     try {
       if (mode === "json") await analyzeJson();
       else if (mode === "live") await analyzeLive();
@@ -327,9 +346,63 @@ export default function CompareWorkspace() {
     }
   }
 
+  // Record history after results arrive
+  useEffect(() => {
+    if (resultsKey > 0 && risk) {
+      const breaking = changes.filter((c) => ["CRITICAL", "HIGH"].includes(c.severity)).length;
+      addHistory({
+        mode,
+        riskScore:    risk.score,
+        riskLabel:    risk.label,
+        changeCount:  changes.length,
+        breakingCount: breaking,
+        label: mode === "live"
+          ? `${reqA.url || "Request A"} vs ${reqB.url || "Request B"}`
+          : mode === "contract"
+          ? `Contract diff (${contractDirection})`
+          : "JSON diff",
+      });
+    }
+  }, [resultsKey]); // intentionally omit deps — runs only when resultsKey increments
+
   useEffect(() => {
     if (resultsKey > 0) resultsRef.current?.focus({ preventScroll: false });
   }, [resultsKey]);
+
+  // ── Share ──
+  async function handleShare() {
+    if (!risk) return;
+    setShareLoading(true);
+    setShareError("");
+    try {
+      const res = await fetch("/api/share", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, changes: changes as DiffChange[], risk: risk as RiskResult, ai }),
+      });
+      const data = await res.json() as { id?: string; error?: string };
+      if (!res.ok || !data.id) throw new Error(data.error ?? "Share failed");
+      const url = `${window.location.origin}/?share=${data.id}`;
+      setShareUrl(url);
+      await navigator.clipboard.writeText(url).catch(() => undefined);
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 3000);
+    } catch (e) {
+      setShareError(e instanceof Error ? e.message : "Share failed");
+    } finally {
+      setShareLoading(false);
+    }
+  }
+
+  // ── Export ──
+  function handleExportJson() {
+    if (!risk) return;
+    downloadFile(exportJson({ mode, changes: changes as DiffChange[], risk: risk as RiskResult, ai }), "diffbeacon-report.json", "application/json");
+  }
+  function handleExportMarkdown() {
+    if (!risk) return;
+    downloadFile(exportMarkdown({ mode, changes: changes as DiffChange[], risk: risk as RiskResult, ai }), "diffbeacon-report.md", "text/markdown");
+  }
 
   // Reset live result when switching modes
   function switchMode(m: Mode) {
@@ -341,6 +414,8 @@ export default function CompareWorkspace() {
     setLiveResult(null);
     setStatusComparison(null);
     setResultsKey(0);
+    setShareUrl(null);
+    setShareError("");
   }
 
   const bodyChanges = changes.filter((c) => c.kind !== "STATUS_CHANGED");
@@ -403,7 +478,7 @@ export default function CompareWorkspace() {
                 <GitBranch size={14} strokeWidth={1.75} aria-hidden="true" />
                 GitHub
               </a>
-              <span className="text-[11px] font-medium tracking-[0.15em] text-zinc-600" aria-label="Version 1.1">V1.1</span>
+              <span className="text-[11px] font-medium tracking-[0.15em] text-zinc-600" aria-label="Version 1.2">V1.2</span>
             </nav>
           </div>
         </header>
@@ -794,6 +869,101 @@ export default function CompareWorkspace() {
               </div>
             </div>
           </section>
+
+          {/* ── Share / Export toolbar ── */}
+          {hasRisk && (
+            <div className="mt-8 flex flex-wrap items-center gap-3 border-t border-white/[0.05] pt-5">
+              <button
+                onClick={handleShare}
+                disabled={shareLoading}
+                className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-zinc-900 px-3 py-1.5 text-[12px] font-medium text-zinc-400 transition-colors duration-150 hover:text-zinc-200 disabled:opacity-40"
+              >
+                {shareLoading
+                  ? <Loader2 size={12} strokeWidth={1.75} className="animate-spin" aria-hidden="true" />
+                  : shareCopied
+                  ? <Check size={12} strokeWidth={2} className="text-emerald-400" aria-hidden="true" />
+                  : <Share2 size={12} strokeWidth={1.75} aria-hidden="true" />}
+                {shareCopied ? "Link copied!" : "Share"}
+              </button>
+              <button
+                onClick={handleExportJson}
+                className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-zinc-900 px-3 py-1.5 text-[12px] font-medium text-zinc-400 transition-colors duration-150 hover:text-zinc-200"
+              >
+                <Download size={12} strokeWidth={1.75} aria-hidden="true" />
+                Export JSON
+              </button>
+              <button
+                onClick={handleExportMarkdown}
+                className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-zinc-900 px-3 py-1.5 text-[12px] font-medium text-zinc-400 transition-colors duration-150 hover:text-zinc-200"
+              >
+                <Download size={12} strokeWidth={1.75} aria-hidden="true" />
+                Export Markdown
+              </button>
+              {shareError && (
+                <span className="text-[12px] text-red-400">{shareError}</span>
+              )}
+              {shareUrl && !shareCopied && (
+                <span className="font-mono text-[11px] text-zinc-500 truncate max-w-xs">{shareUrl}</span>
+              )}
+            </div>
+          )}
+
+          {/* ── History panel ── */}
+          <div className="mt-8 border-t border-white/[0.05] pt-5">
+            <div className="flex items-center justify-between">
+              <button
+                onClick={() => setShowHistory((v) => !v)}
+                className="inline-flex items-center gap-1.5 text-[12px] font-medium text-zinc-600 transition-colors duration-150 hover:text-zinc-400"
+                aria-expanded={showHistory}
+              >
+                <History size={13} strokeWidth={1.75} aria-hidden="true" />
+                History ({historyEntries.length})
+              </button>
+              {showHistory && historyEntries.length > 0 && (
+                <button
+                  onClick={clearHistory}
+                  className="inline-flex items-center gap-1 text-[11px] text-zinc-700 transition-colors duration-150 hover:text-red-400"
+                >
+                  <Trash2 size={11} strokeWidth={1.75} aria-hidden="true" />
+                  Clear all
+                </button>
+              )}
+            </div>
+            {showHistory && (
+              <div className="mt-3">
+                {historyEntries.length === 0 ? (
+                  <p className="text-[12px] text-zinc-700">No history yet. Run an analysis to record it here.</p>
+                ) : (
+                  <ul className="divide-y divide-white/[0.04]">
+                    {historyEntries.map((entry) => (
+                      <li key={entry.id} className="flex items-center justify-between gap-4 py-2.5">
+                        <div className="min-w-0">
+                          <p className="truncate text-[12px] text-zinc-400">{entry.label}</p>
+                          <p className="mt-0.5 text-[11px] text-zinc-700">
+                            {new Date(entry.timestamp).toLocaleString()} &middot; {entry.mode.toUpperCase()} &middot;
+                            <span className={`ml-1 font-medium ${
+                              entry.riskLabel === "CRITICAL" ? "text-red-400" :
+                              entry.riskLabel === "HIGH" ? "text-orange-400" :
+                              entry.riskLabel === "MEDIUM" ? "text-amber-400" :
+                              entry.riskLabel === "LOW" ? "text-emerald-400" : "text-zinc-500"
+                            }`}>{entry.riskLabel}</span>
+                            &nbsp;{entry.riskScore}/100 &middot; {entry.changeCount} changes ({entry.breakingCount} breaking)
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => removeHistory(entry.id)}
+                          aria-label="Remove history entry"
+                          className="shrink-0 text-zinc-700 transition-colors duration-150 hover:text-red-400"
+                        >
+                          <X size={13} strokeWidth={1.75} aria-hidden="true" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
 
           <div className="h-16" />
         </main>
