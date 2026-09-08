@@ -51,7 +51,7 @@ export function useHistory() {
     setEntries((prev) => {
       const next: HistoryEntry = {
         ...entry,
-        id:        crypto.randomUUID(),
+        id:        (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36),
         timestamp: Date.now(),
       };
       const updated = [next, ...prev].slice(0, MAX_ENTRIES);

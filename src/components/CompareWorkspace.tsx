@@ -194,7 +194,7 @@ export default function CompareWorkspace() {
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState("");
   const reduced                     = useReducedMotion();
-  const [entered, setEntered]       = useState(false);
+  const [entered, setEntered]       = useState(true);
   const [resultsKey, setResultsKey] = useState(0);
   const animatedScore               = useAnimatedScore(risk?.score ?? 0);
   const resultsRef                  = useRef<HTMLElement>(null);
@@ -206,9 +206,12 @@ export default function CompareWorkspace() {
   const [shareError, setShareError]     = useState("");
 
   useEffect(() => {
-    const id = requestAnimationFrame(() => setEntered(true));
-    return () => cancelAnimationFrame(id);
-  }, []);
+    if (!reduced) {
+      setEntered(false);
+      const id = requestAnimationFrame(() => setEntered(true));
+      return () => cancelAnimationFrame(id);
+    }
+  }, [reduced]);
 
   const counts = useMemo(() => ({
     breaking: changes.filter((c) => ["CRITICAL", "HIGH"].includes(c.severity)).length,
