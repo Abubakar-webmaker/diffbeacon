@@ -13,13 +13,14 @@ const nextConfig: NextConfig = {
           key: "Content-Security-Policy",
           value: [
             "default-src 'self'",
-            // Next.js inline scripts + Monaco editor workers
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:",
-            "style-src 'self' 'unsafe-inline'",
-            "font-src 'self' data:",
+            // Next.js inline scripts + Monaco editor workers + CDN loader
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://cdn.jsdelivr.net",
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+            "style-src-elem 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+            "font-src 'self' data: https://cdn.jsdelivr.net",
             // Monaco editor loads workers as blobs
             "worker-src blob:",
-            "connect-src 'self'",
+            "connect-src 'self' https://cdn.jsdelivr.net",
             "img-src 'self' data:",
             "frame-ancestors 'none'",
           ].join("; "),
