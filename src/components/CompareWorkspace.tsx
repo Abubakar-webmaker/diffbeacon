@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   GitBranch,
   ScanSearch,
@@ -204,6 +205,7 @@ export default function CompareWorkspace() {
   const [shareCopied, setShareCopied]   = useState(false);
   const [shareLoading, setShareLoading] = useState(false);
   const [shareError, setShareError]     = useState("");
+  const searchParams = useSearchParams();
 
   useEffect(() => {
     if (!reduced) {
@@ -212,6 +214,41 @@ export default function CompareWorkspace() {
       return () => cancelAnimationFrame(id);
     }
   }, [reduced]);
+
+  // Load shared result when ?share=ID is present in the URL
+  useEffect(() => {
+    const shareId = searchParams.get("share");
+    if (!shareId) return;
+    let cancelled = false;
+    setLoading(true);
+    setError("");
+    fetch(`/api/share/${encodeURIComponent(shareId)}`)
+      .then(async (res) => {
+        if (cancelled) return;
+        const data = await res.json() as {
+          mode?: Mode; changes?: Change[]; risk?: { score: number; label: string };
+          ai?: { summary: string; recommendations: string[] } | null;
+          error?: string;
+        };
+        if (!res.ok) {
+          setError(data.error ?? "Shared link not found or has expired.");
+          return;
+        }
+        if (data.mode) setMode(data.mode);
+        setChanges(data.changes ?? []);
+        setRisk(data.risk ?? null);
+        setAi(data.ai ?? null);
+        setResultsKey((k) => k + 1);
+        setShareUrl(window.location.href);
+      })
+      .catch(() => {
+        if (!cancelled) setError("Failed to load shared result. Check your connection and try again.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const counts = useMemo(() => ({
     breaking: changes.filter((c) => ["CRITICAL", "HIGH"].includes(c.severity)).length,
